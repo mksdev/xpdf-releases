@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 #include "gmem.h"
 #include "Object.h"
 #include "Stream.h"
@@ -113,7 +114,7 @@ ObjectStream::ObjectStream(XRef *xref, int objStrNumA) {
   // in the 'new Object[nObjects]' call (Acrobat apparently limits
   // object streams to 100-200 objects)
   if (nObjects > 1000000) {
-    error(-1, "Too many objects in an object stream");
+    error(errSyntaxError, -1, "Too many objects in an object stream");
     goto err1;
   }
   objs = new Object[nObjects];
@@ -126,8 +127,8 @@ ObjectStream::ObjectStream(XRef *xref, int objStrNumA) {
   str = new EmbedStream(objStr.getStream(), &obj1, gTrue, first);
   parser = new Parser(xref, new Lexer(xref, str), gFalse);
   for (i = 0; i < nObjects; ++i) {
-    parser->getObj(&obj1);
-    parser->getObj(&obj2);
+    parser->getObj(&obj1, gTrue);
+    parser->getObj(&obj2, gTrue);
     if (!obj1.isInt() || !obj2.isInt()) {
       obj1.free();
       obj2.free();
@@ -201,13 +202,14 @@ Object *ObjectStream::getObject(int objIdx, int objNum, Object *obj) {
 // XRef
 //------------------------------------------------------------------------
 
-XRef::XRef(BaseStream *strA) {
+XRef::XRef(BaseStream *strA, GBool repair) {
   Guint pos;
   Object obj;
 
   ok = gTrue;
   errCode = errNone;
   size = 0;
+  last = -1;
   entries = NULL;
   streamEnds = NULL;
   streamEndsLen = 0;
@@ -217,30 +219,32 @@ XRef::XRef(BaseStream *strA) {
   permFlags = defPermFlags;
   ownerPasswordOk = gFalse;
 
-  // read the trailer
   str = strA;
   start = str->getStart();
-  pos = getStartXref();
 
-  // if there was a problem with the 'startxref' position, try to
-  // reconstruct the xref table
-  if (pos == 0) {
+  // if the 'repair' flag is set, try to reconstruct the xref table
+  if (repair) {
     if (!(ok = constructXRef())) {
       errCode = errDamaged;
       return;
     }
 
-  // read the xref table
+  // if the 'repair' flag is not set, read the xref table
   } else {
-    while (readXRef(&pos)) ;
 
-    // if there was a problem with the xref table,
-    // try to reconstruct it
+    // read the trailer
+    pos = getStartXref();
+    if (pos == 0) {
+      errCode = errDamaged;
+      ok = gFalse;
+      return;
+    }
+
+    // read the xref table
+    while (readXRef(&pos)) ;
     if (!ok) {
-      if (!(ok = constructXRef())) {
-	errCode = errDamaged;
-	return;
-      }
+      errCode = errDamaged;
+      return;
     }
   }
 
@@ -299,7 +303,7 @@ Guint XRef::getStartXref() {
   if (i < 0) {
     return 0;
   }
-  for (p = &buf[i+9]; isspace(*p); ++p) ;
+  for (p = &buf[i+9]; isspace(*p & 0xff); ++p) ;
   lastXRefPos = strToUnsigned(p);
 
   return lastXRefPos;
@@ -318,7 +322,7 @@ GBool XRef::readXRef(Guint *pos) {
 	     new Lexer(NULL,
 	       str->makeSubStream(start + *pos, gFalse, 0, &obj)),
 	     gTrue);
-  parser->getObj(&obj);
+  parser->getObj(&obj, gTrue);
 
   // parse an old-style xref table
   if (obj.isCmd("xref")) {
@@ -328,11 +332,11 @@ GBool XRef::readXRef(Guint *pos) {
   // parse an xref stream
   } else if (obj.isInt()) {
     obj.free();
-    if (!parser->getObj(&obj)->isInt()) {
+    if (!parser->getObj(&obj, gTrue)->isInt()) {
       goto err1;
     }
     obj.free();
-    if (!parser->getObj(&obj)->isCmd("obj")) {
+    if (!parser->getObj(&obj, gTrue)->isCmd("obj")) {
       goto err1;
     }
     obj.free();
@@ -364,7 +368,7 @@ GBool XRef::readXRefTable(Parser *parser, Guint *pos) {
   int first, n, newSize, i;
 
   while (1) {
-    parser->getObj(&obj);
+    parser->getObj(&obj, gTrue);
     if (obj.isCmd("trailer")) {
       obj.free();
       break;
@@ -374,7 +378,7 @@ GBool XRef::readXRefTable(Parser *parser, Guint *pos) {
     }
     first = obj.getInt();
     obj.free();
-    if (!parser->getObj(&obj)->isInt()) {
+    if (!parser->getObj(&obj, gTrue)->isInt()) {
       goto err1;
     }
     n = obj.getInt();
@@ -397,17 +401,17 @@ GBool XRef::readXRefTable(Parser *parser, Guint *pos) {
       size = newSize;
     }
     for (i = first; i < first + n; ++i) {
-      if (!parser->getObj(&obj)->isInt()) {
+      if (!parser->getObj(&obj, gTrue)->isInt()) {
 	goto err1;
       }
       entry.offset = (Guint)obj.getInt();
       obj.free();
-      if (!parser->getObj(&obj)->isInt()) {
+      if (!parser->getObj(&obj, gTrue)->isInt()) {
 	goto err1;
       }
       entry.gen = obj.getInt();
       obj.free();
-      parser->getObj(&obj);
+      parser->getObj(&obj, gTrue);
       if (obj.isCmd("n")) {
 	entry.type = xrefEntryUncompressed;
       } else if (obj.isCmd("f")) {
@@ -428,6 +432,9 @@ GBool XRef::readXRefTable(Parser *parser, Guint *pos) {
 	  entries[0] = entries[1];
 	  entries[1].offset = 0xffffffff;
 	}
+	if (i > last) {
+	  last = i;
+	}
       }
     }
   }
@@ -440,13 +447,25 @@ GBool XRef::readXRefTable(Parser *parser, Guint *pos) {
   // get the 'Prev' pointer
   obj.getDict()->lookupNF("Prev", &obj2);
   if (obj2.isInt()) {
-    *pos = (Guint)obj2.getInt();
-    more = gTrue;
+    pos2 = (Guint)obj2.getInt();
+    if (pos2 != *pos) {
+      *pos = pos2;
+      more = gTrue;
+    } else {
+      error(errSyntaxWarning, -1, "Infinite loop in xref table");
+      more = gFalse;
+    }
   } else if (obj2.isRef()) {
     // certain buggy PDF generators generate "/Prev NNN 0 R" instead
     // of "/Prev NNN"
-    *pos = (Guint)obj2.getRefNum();
-    more = gTrue;
+    pos2 = (Guint)obj2.getRefNum();
+    if (pos2 != *pos) {
+      *pos = pos2;
+      more = gTrue;
+    } else {
+      error(errSyntaxWarning, -1, "Infinite loop in xref table");
+      more = gFalse;
+    }
   } else {
     more = gFalse;
   }
@@ -635,6 +654,9 @@ GBool XRef::readXRefStreamSection(Stream *xrefStr, int *w, int first, int n) {
       default:
 	return gFalse;
       }
+      if (i > last) {
+	last = i;
+      }
     }
   }
 
@@ -658,7 +680,6 @@ GBool XRef::constructXRef() {
   size = 0;
   entries = NULL;
 
-  error(-1, "PDF file is damaged - attempting to reconstruct xref table...");
   gotRoot = gFalse;
   streamEndsLen = streamEndsSize = 0;
 
@@ -698,30 +719,30 @@ GBool XRef::constructXRef() {
       delete parser;
 
     // look for object
-    } else if (isdigit(*p)) {
+    } else if (isdigit(*p & 0xff)) {
       num = atoi(p);
       if (num > 0) {
 	do {
 	  ++p;
-	} while (*p && isdigit(*p));
-	if (isspace(*p)) {
+	} while (*p && isdigit(*p & 0xff));
+	if (isspace(*p & 0xff)) {
 	  do {
 	    ++p;
-	  } while (*p && isspace(*p));
-	  if (isdigit(*p)) {
+	  } while (*p && isspace(*p & 0xff));
+	  if (isdigit(*p & 0xff)) {
 	    gen = atoi(p);
 	    do {
 	      ++p;
-	    } while (*p && isdigit(*p));
-	    if (isspace(*p)) {
+	    } while (*p && isdigit(*p & 0xff));
+	    if (isspace(*p & 0xff)) {
 	      do {
 		++p;
-	      } while (*p && isspace(*p));
+	      } while (*p && isspace(*p & 0xff));
 	      if (!strncmp(p, "obj", 3)) {
 		if (num >= size) {
 		  newSize = (num + 1 + 255) & ~255;
 		  if (newSize < 0) {
-		    error(-1, "Bad object number");
+		    error(errSyntaxError, -1, "Bad object number");
 		    return gFalse;
 		  }
 		  entries = (XRefEntry *)
@@ -737,6 +758,9 @@ GBool XRef::constructXRef() {
 		  entries[num].offset = pos - start;
 		  entries[num].gen = gen;
 		  entries[num].type = xrefEntryUncompressed;
+		  if (num > last) {
+		    last = num;
+		  }
 		}
 	      }
 	    }
@@ -748,7 +772,7 @@ GBool XRef::constructXRef() {
       if (streamEndsLen == streamEndsSize) {
 	streamEndsSize += 64;
 	streamEnds = (Guint *)greallocn(streamEnds,
-					streamEndsSize, sizeof(int));
+					streamEndsSize, sizeof(Guint));
       }
       streamEnds[streamEndsLen++] = pos;
     }
@@ -757,7 +781,7 @@ GBool XRef::constructXRef() {
   if (gotRoot)
     return gTrue;
 
-  error(-1, "Couldn't find trailer dictionary");
+  error(errSyntaxError, -1, "Couldn't find trailer dictionary");
   return gFalse;
 }
 
@@ -769,10 +793,10 @@ void XRef::setEncryption(int permFlagsA, GBool ownerPasswordOkA,
   encrypted = gTrue;
   permFlags = permFlagsA;
   ownerPasswordOk = ownerPasswordOkA;
-  if (keyLengthA <= 16) {
+  if (keyLengthA <= 32) {
     keyLength = keyLengthA;
   } else {
-    keyLength = 16;
+    keyLength = 32;
   }
   for (i = 0; i < keyLength; ++i) {
     fileKey[i] = fileKeyA[i];
@@ -797,7 +821,7 @@ GBool XRef::okToAddNotes(GBool ignoreOwnerPW) {
   return (!ignoreOwnerPW && ownerPasswordOk) || (permFlags & permNotes);
 }
 
-Object *XRef::fetch(int num, int gen, Object *obj) {
+Object *XRef::fetch(int num, int gen, Object *obj, int recursion) {
   XRefEntry *e;
   Parser *parser;
   Object obj1, obj2, obj3;
@@ -819,9 +843,9 @@ Object *XRef::fetch(int num, int gen, Object *obj) {
 	       new Lexer(this,
 		 str->makeSubStream(start + e->offset, gFalse, 0, &obj1)),
 	       gTrue);
-    parser->getObj(&obj1);
-    parser->getObj(&obj2);
-    parser->getObj(&obj3);
+    parser->getObj(&obj1, gTrue);
+    parser->getObj(&obj2, gTrue);
+    parser->getObj(&obj3, gTrue);
     if (!obj1.isInt() || obj1.getInt() != num ||
 	!obj2.isInt() || obj2.getInt() != gen ||
 	!obj3.isCmd("obj")) {
@@ -831,8 +855,8 @@ Object *XRef::fetch(int num, int gen, Object *obj) {
       delete parser;
       goto err;
     }
-    parser->getObj(obj, encrypted ? fileKey : (Guchar *)NULL,
-		   encAlgorithm, keyLength, num, gen);
+    parser->getObj(obj, gFalse, encrypted ? fileKey : (Guchar *)NULL,
+		   encAlgorithm, keyLength, num, gen, recursion);
     obj1.free();
     obj2.free();
     obj3.free();
@@ -840,7 +864,14 @@ Object *XRef::fetch(int num, int gen, Object *obj) {
     break;
 
   case xrefEntryCompressed:
+#if 0 // Adobe apparently ignores the generation number on compressed objects
     if (gen != 0) {
+      goto err;
+    }
+#endif
+    if (e->offset >= (Guint)size ||
+	entries[e->offset].type != xrefEntryUncompressed) {
+      error(errSyntaxError, -1, "Invalid object stream");
       goto err;
     }
     if (!objStr || objStr->getObjStrNum() != (int)e->offset) {
@@ -900,13 +931,16 @@ GBool XRef::getStreamEnd(Guint streamStart, Guint *streamEnd) {
 }
 
 Guint XRef::strToUnsigned(char *s) {
-  Guint x;
+  Guint x, d;
   char *p;
-  int i;
 
   x = 0;
-  for (p = s, i = 0; *p && isdigit(*p) && i < 10; ++p, ++i) {
-    x = 10 * x + (*p - '0');
+  for (p = s; *p && isdigit(*p & 0xff); ++p) {
+    d = *p - '0';
+    if (x > (UINT_MAX - d) / 10) {
+      break;
+    }
+    x = 10 * x + d;
   }
   return x;
 }

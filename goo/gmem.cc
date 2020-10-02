@@ -287,10 +287,10 @@ void gMemReport(FILE *f) {
 }
 #endif
 
-char *copyString(char *s) {
+char *copyString(const char *s) {
   char *s1;
 
-  s1 = (char *)gmalloc(strlen(s) + 1);
+  s1 = (char *)gmalloc((int)strlen(s) + 1);
   strcpy(s1, s);
   return s1;
 }

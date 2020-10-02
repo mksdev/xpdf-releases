@@ -75,24 +75,32 @@ SplashBitmap::SplashBitmap(int widthA, int heightA, int rowPad,
   }
 }
 
-
 SplashBitmap::~SplashBitmap() {
-  if (rowSize < 0) {
-    gfree(data + (height - 1) * rowSize);
-  } else {
-    gfree(data);
+  if (data) {
+    if (rowSize < 0) {
+      gfree(data + (height - 1) * rowSize);
+    } else {
+      gfree(data);
+    }
   }
   gfree(alpha);
 }
 
 SplashError SplashBitmap::writePNMFile(char *fileName) {
   FILE *f;
-  SplashColorPtr row, p;
-  int x, y;
+  SplashError err;
 
   if (!(f = fopen(fileName, "wb"))) {
     return splashErrOpenFile;
   }
+  err = writePNMFile(f);
+  fclose(f);
+  return err;
+}
+
+SplashError SplashBitmap::writePNMFile(FILE *f) {
+  SplashColorPtr row, p;
+  int x, y;
 
   switch (mode) {
 
@@ -113,11 +121,7 @@ SplashError SplashBitmap::writePNMFile(char *fileName) {
     fprintf(f, "P5\n%d %d\n255\n", width, height);
     row = data;
     for (y = 0; y < height; ++y) {
-      p = row;
-      for (x = 0; x < width; ++x) {
-	fputc(*p, f);
-	++p;
-      }
+      fwrite(row, 1, width, f);
       row += rowSize;
     }
     break;
@@ -126,13 +130,7 @@ SplashError SplashBitmap::writePNMFile(char *fileName) {
     fprintf(f, "P6\n%d %d\n255\n", width, height);
     row = data;
     for (y = 0; y < height; ++y) {
-      p = row;
-      for (x = 0; x < width; ++x) {
-	fputc(splashRGB8R(p), f);
-	fputc(splashRGB8G(p), f);
-	fputc(splashRGB8B(p), f);
-	p += 3;
-      }
+      fwrite(row, 1, 3 * width, f);
       row += rowSize;
     }
     break;
@@ -157,11 +155,27 @@ SplashError SplashBitmap::writePNMFile(char *fileName) {
     // PNM doesn't support CMYK
     break;
 #endif
+
   }
 
+  return splashOk;
+}
+
+SplashError SplashBitmap::writeAlphaPGMFile(char *fileName) {
+  FILE *f;
+
+  if (!alpha) {
+    return splashErrModeMismatch;
+  }
+  if (!(f = fopen(fileName, "wb"))) {
+    return splashErrOpenFile;
+  }
+  fprintf(f, "P5\n%d %d\n255\n", width, height);
+  fwrite(alpha, 1, width * height, f);
   fclose(f);
   return splashOk;
 }
+
 
 void SplashBitmap::getPixel(int x, int y, SplashColorPtr pixel) {
   SplashColorPtr p;
@@ -204,4 +218,12 @@ void SplashBitmap::getPixel(int x, int y, SplashColorPtr pixel) {
 
 Guchar SplashBitmap::getAlpha(int x, int y) {
   return alpha[y * width + x];
+}
+
+SplashColorPtr SplashBitmap::takeData() {
+  SplashColorPtr data2;
+
+  data2 = data;
+  data = NULL;
+  return data2;
 }

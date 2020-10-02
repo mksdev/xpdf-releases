@@ -40,7 +40,8 @@ public:
   virtual void close();
   virtual int getChar();
   virtual int lookChar();
-  virtual GString *getPSFilter(int psLevel, char *indent);
+  virtual int getBlock(char *blk, int size);
+  virtual GString *getPSFilter(int psLevel, const char *indent);
   virtual GBool isBinary(GBool last = gTrue);
 
 private:
@@ -124,6 +125,7 @@ private:
   Stream *curStr;
   Guchar *dataPtr;
   Guchar *dataEnd;
+  Guint byteCounter;
 
   JArithmeticDecoder *arithDecoder;
   JArithmeticDecoderStats *genericRegionStats;
