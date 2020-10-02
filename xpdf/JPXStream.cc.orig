@@ -12,7 +12,6 @@
 #pragma implementation
 #endif
 
-#include <limits.h>
 #include "gmem.h"
 #include "Error.h"
 #include "JArithmeticDecoder.h"
